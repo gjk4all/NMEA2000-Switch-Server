@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <microhttpd.h>
+#include <ulfius.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
@@ -18,7 +19,7 @@
 // Initial NMEA2000 values
 #define N2K_PRIO	3	/* Priority of the messages on the network */
 #define N2K_ID		112	/* Initial NMEA2K sender id */
-#define RELAY_BOARD_ID	128	/* Switch bank id (0-255), Only top 4 bits count, lower 4 are set on the command line */
+#define RELAY_BOARD_ID	0x8C	/* Switch bank id (0-255), Only top 4 bits count, lower 4 are set on the command line */
 #define RELAY_CHANNELS	8	/* Number of relays on this board */
 
 // Initial ISO NAME parameters
@@ -74,19 +75,19 @@ void n2k_127501_handler(struct NMEA2000_FRAME *n2kFrame);
 void n2k_60928_handler(struct NMEA2000_FRAME *n2kFrame);
 int Compare_NameWeight(uint8_t *data);
 void send_n2k_60928_message();
-enum MHD_Result answer_to_connection (void *cls, struct MHD_Connection *connection,
-                                      const char *url,
-                                      const char *method, const char *version,
-                                      const char *upload_data,
-                                      size_t *upload_data_size, void **req_cls);
+void send_n2k_127502_message(uint8_t *data);
+int callback_status(const struct _u_request * request, struct _u_response * response, void * user_data);
+int callback_switch(const struct _u_request * request, struct _u_response * response, void * user_data);
 
 
 int canSocket;
 int pid;
 uint8_t relayId = RELAY_BOARD_ID;
 uint32_t switchStatus;
+clock_t switchUpdate;
 struct NMEA2K_NETWORK nmea2kNetwork;
 struct MHD_Daemon *mh_daemon;
+struct _u_instance instance;
 
 
 int main(int argc, char *argv[]) {
@@ -98,6 +99,22 @@ int main(int argc, char *argv[]) {
 
     // Define exit cleanup function
     atexit(cleanup);
+
+    // Initialize instance with the port number
+    if (ulfius_init_instance(&instance, TCP_PORT, NULL, NULL) != U_OK) {
+        fprintf(stderr, "Error ulfius_init_instance, abort\n");
+        return(1);
+    }
+    // Endpoint list declaration
+    ulfius_add_endpoint_by_val(&instance, "GET", "/status", NULL, 0, &callback_status, NULL);
+    ulfius_add_endpoint_by_val(&instance, "GET", "/switch", "/:id", 0, &callback_switch, NULL);
+
+    // Start the framework
+    if (ulfius_start_framework(&instance) != U_OK) {
+        fprintf(stderr, "Error starting framework\n");
+        return(1);
+    }
+
 
     // Populate initial N2K network structure   
     nmea2kNetwork.senderId = N2K_ID;
@@ -176,12 +193,6 @@ int main(int argc, char *argv[]) {
         if ((nmea2kNetwork.linkState == LINK_STATE_CLAIMED) && (time > timer)) {
             nmea2kNetwork.linkState = LINK_STATE_ACTIVE;
             nmea2kNetwork.linkRetries = 0;
-            mh_daemon = MHD_start_daemon (MHD_USE_INTERNAL_POLLING_THREAD, TCP_PORT, NULL, NULL,
-                             &answer_to_connection, NULL, MHD_OPTION_END);
-            if (mh_daemon == NULL) {
-                perror("Error starting microhttpd daemon!");
-                return 3;
-            }
         }
 
         // Check the CAN receive buffer
@@ -197,7 +208,8 @@ int main(int argc, char *argv[]) {
 }
 
 void cleanup() {
-    MHD_stop_daemon (mh_daemon);
+    ulfius_stop_framework(&instance);
+    ulfius_clean_instance(&instance);
 }
 
 void nmea2k_receive(struct can_frame *frame) {
@@ -239,6 +251,7 @@ void n2k_127501_handler(struct NMEA2000_FRAME *n2kFrame) {
         else
             switchStatus &= ~(1 << i);
     }
+    switchUpdate = clock();
 }
 
 void n2k_60928_handler(struct NMEA2000_FRAME *n2kFrame) {
@@ -309,21 +322,54 @@ void send_n2k_60928_message() {
     }
 }
 
-enum MHD_Result answer_to_connection (void *cls, struct MHD_Connection *connection,
-                                      const char *url,
-                                      const char *method, const char *version,
-                                      const char *upload_data,
-                                      size_t *upload_data_size, void **req_cls)
-{
-    char page[255];
-    struct MHD_Response *response;
-    int ret;
+void send_n2k_127502_message(uint8_t *data) {
+    int nbytes;
+    struct can_frame frame;
 
-    sprintf(page, "<html><body>Hello, browser!<br>%d</body></html>", switchStatus);
-    response = MHD_create_response_from_buffer (strlen (page), (void*) page, MHD_RESPMEM_PERSISTENT);
+    frame.can_id = (1 << 31) | (3 << 26) | (127502 << 8) | nmea2kNetwork.senderId;
+    frame.len    = 8;
+    memcpy(frame.data, data, 8);
 
-    ret = MHD_queue_response (connection, MHD_HTTP_OK, response);
-    MHD_destroy_response (response);
-
-    return ret;
+    if ((nbytes = write(canSocket, &frame, sizeof(frame))) != sizeof(frame)) {
+        perror("NMEA2000 transmit error!");
+        exit(2);
+    }
 }
+
+int callback_status(const struct _u_request * request, struct _u_response * response, void * user_data) {
+    char status[255];
+
+    sprintf(status, "{\"status\": \"%d\",\"age\": \"%d\"}\n", switchStatus, clock() - switchUpdate);
+    ulfius_set_string_body_response(response, 200, status);
+    return U_CALLBACK_CONTINUE;
+}
+
+int callback_switch(const struct _u_request * request, struct _u_response * response, void * user_data) {
+    char status[255], *cmd;
+    uint8_t data[] = {RELAY_BOARD_ID, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    int id, index, offset;
+
+    id = atoi(u_map_get(request->map_url, "id"));
+    if ((id > 0) && (id <= RELAY_CHANNELS)) {
+        index = (id - 1) / 4 + 1;
+        offset = 6 - (((id - 1) % 4) * 2);
+
+        if (switchStatus & (1 << (id - 1))) {
+            data[index] &= ~(3 << offset);
+            cmd = "off";
+        }
+        else {
+            data[index] &= ~(2 << offset);
+            cmd = "on";
+        }
+        send_n2k_127502_message(data);
+
+        sprintf(status, "{\"switch\": \"%d\",\"status\": \"%s\"}\n", id, cmd);
+        ulfius_set_string_body_response(response, 200, status);
+    }
+    else
+        ulfius_set_string_body_response(response, 404, "Not found!");
+
+    return U_CALLBACK_CONTINUE;
+}
+
