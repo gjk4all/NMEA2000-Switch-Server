@@ -78,6 +78,7 @@ void send_n2k_60928_message();
 void send_n2k_127502_message(uint8_t *data);
 int callback_status(const struct _u_request * request, struct _u_response * response, void * user_data);
 int callback_switch(const struct _u_request * request, struct _u_response * response, void * user_data);
+int callback_index(const struct _u_request * request, struct _u_response * response, void * user_data);
 
 
 int canSocket;
@@ -106,8 +107,9 @@ int main(int argc, char *argv[]) {
         return(1);
     }
     // Endpoint list declaration
-    ulfius_add_endpoint_by_val(&instance, "GET", "/status", NULL, 0, &callback_status, NULL);
-    ulfius_add_endpoint_by_val(&instance, "GET", "/switch", "/:id", 0, &callback_switch, NULL);
+    ulfius_add_endpoint_by_val(&instance, "GET", "status", NULL, 0, &callback_status, NULL);
+    ulfius_add_endpoint_by_val(&instance, "GET", "switch", "/:id", 0, &callback_switch, NULL);
+    ulfius_add_endpoint_by_val(&instance, "GET", "*", NULL, 1, &callback_index, NULL);
 
     // Start the framework
     if (ulfius_start_framework(&instance) != U_OK) {
@@ -339,9 +341,9 @@ void send_n2k_127502_message(uint8_t *data) {
 int callback_status(const struct _u_request * request, struct _u_response * response, void * user_data) {
     char status[255];
 
-    sprintf(status, "{\"status\": \"%d\",\"age\": \"%d\"}\n", switchStatus, clock() - switchUpdate);
+    sprintf(status, "{\"id\": \"%d\",\"status\": \"%d\",\"age\": \"%d\"}\n", RELAY_BOARD_ID & 0x0F, switchStatus, clock() - switchUpdate);
     ulfius_set_string_body_response(response, 200, status);
-    return U_CALLBACK_CONTINUE;
+    return U_CALLBACK_COMPLETE;
 }
 
 int callback_switch(const struct _u_request * request, struct _u_response * response, void * user_data) {
@@ -370,6 +372,35 @@ int callback_switch(const struct _u_request * request, struct _u_response * resp
     else
         ulfius_set_string_body_response(response, 404, "Not found!");
 
-    return U_CALLBACK_CONTINUE;
+    return U_CALLBACK_COMPLETE;
+}
+
+int callback_index(const struct _u_request * request, struct _u_response * response, void * user_data) {
+    FILE *fptr;
+    char *content;
+
+    if ((fptr = fopen("index.html", "r")) == NULL) {
+        ulfius_set_string_body_response(response, 404, "Not found!");
+        return U_CALLBACK_CONTINUE;
+    }
+
+    fseek(fptr, 0L, SEEK_END);
+    int fsize = ftell(fptr);
+    rewind(fptr);
+
+    if ((content = malloc((fsize + 1) * sizeof(char))) == NULL) {
+        ulfius_set_string_body_response(response, 500, "Internal server error!");
+        return U_CALLBACK_CONTINUE;
+    }
+
+    fread(content, fsize, 1, fptr);
+    content[fsize] = '\0';
+    fclose(fptr);
+
+    ulfius_set_string_body_response(response, 200, content);
+    ulfius_add_header_to_response(response, "Content-Type", "text/html; charset=utf-8");
+    ulfius_add_header_to_response(response, "Content-Location", "/index.html");
+
+    return U_CALLBACK_COMPLETE;
 }
 

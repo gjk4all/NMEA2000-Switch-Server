@@ -1,0 +1,52 @@
+<html><head>
+    <title>NMEA2000 Switch Bank Control</title>
+    <link href="https://vjs.zencdn.net/7.20.3/video-js.css" rel="stylesheet">
+    <script src="https://vjs.zencdn.net/7.20.3/video.min.js"></script>
+    <script src="https://unpkg.com/videojs-contrib-hls/dist/videojs-contrib-hls.js"></script>
+    <style>
+        .button_on {background-color: LawnGreen;}
+    </style>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
+    <script>
+        $(document).ready( function() {
+            $("button").on('click', buttonClick);
+            window.setInterval(refreshStatus, 500);
+            refreshStatus();
+        });
+
+        function refreshStatus() {
+            $.getJSON("status", function(data, status) {
+                $("#switch_bank_id").text(data.id);
+                for (i = 0; i < 8; i++) {
+                    switchId = "#switch_" + (i + 1);
+                    if ((data.status & (1 << i)) == 0) {
+                        $(switchId).removeClass("button_on");
+                    }
+                    else {
+                        $(switchId).addClass("button_on");
+                    };
+                };
+            });
+        };
+
+        function buttonClick(e) {
+            switch_id = $(e.target).attr("value");
+            console.log("Switch: " + switch_id);
+            $.getJSON("switch/" + switch_id, function(data, status) {
+            });
+        };
+    </script>
+</head><body>
+    <h1>NMEA2000 Switch Bank Control</h1>
+    <h2>Switch bank: <span id="switch_bank_id"></span></h2>
+    <form id="switch_form">
+        <button id="switch_1" type="button" value="1">Switch 1</button>
+        <button id="switch_2" type="button" value="2">Switch 2</button>
+        <button id="switch_3" type="button" value="3">Switch 3</button>
+        <button id="switch_4" type="button" value="4">Switch 4</button>
+        <button id="switch_5" type="button" value="5">Switch 5</button>
+        <button id="switch_6" type="button" value="6">Switch 6</button>
+        <button id="switch_7" type="button" value="7">Switch 7</button>
+        <button id="switch_8" type="button" value="8">Switch 8</button>
+    </form>
+</body></html>
